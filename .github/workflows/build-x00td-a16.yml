@@ -42,21 +42,6 @@ jobs:
         run: |
           git clone --depth=1 -b 14 https://github.com/ZyCromerZ/Clang.git "$HOME/clang"
 
-      - name: Check Build Tools
-        run: |
-          echo "Kernel source:"
-          pwd
-          git branch --show-current
-          git rev-parse --short HEAD
-
-          echo "ZyCromerZ Clang:"
-          "$HOME/clang/bin/clang" --version || true
-
-          echo "System LLVM:"
-          /usr/bin/clang --version
-          /usr/bin/ld.lld --version
-          /usr/bin/llvm-objdump --version
-
       - name: Apply Build Patches
         run: |
           find scripts/dtc/ -type f -name "dtc-lexer.l" \
@@ -129,14 +114,8 @@ jobs:
           export KBUILD_BUILD_USER=github
           export KBUILD_BUILD_HOST=actions
 
-          echo "Compiler:"
-          which clang
           clang --version
-
-          echo "LLVM tools:"
           /usr/bin/ld.lld --version
-          /usr/bin/llvm-objdump --version
-          /usr/bin/llvm-ar --version
 
           make -j"$(nproc --all)" \
             O=out \
@@ -165,7 +144,6 @@ jobs:
         run: |
           BOOT_DIR="out/arch/arm64/boot"
 
-          echo "Boot output files:"
           find "$BOOT_DIR" -maxdepth 2 -type f | sort || true
 
           if [ ! -f "$BOOT_DIR/Image.gz-dtb" ] && [ ! -f "$BOOT_DIR/Image.gz" ]; then
@@ -173,7 +151,7 @@ jobs:
             exit 1
           fi
 
-      - name: Package with AnyKernel3
+      - name: Package Flashable Zip
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git "$HOME/AnyKernel3"
 
@@ -208,34 +186,20 @@ jobs:
             set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
           }
 
-          BLOCK=
-          IS_SLOT_DEVICE=0
-          RAMDISK_COMPRESSION=auto
-          PATCH_VBMETA_FLAG=auto
+          block=boot;
+          is_slot_device=0;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
 
-          . tools/ak3-core.sh
+          BLOCK=boot;
+          IS_SLOT_DEVICE=0;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
 
-          for boot_block in \
-            /dev/block/bootdevice/by-name/boot \
-            /dev/block/by-name/boot \
-            /dev/block/platform/*/by-name/boot \
-            /dev/block/platform/*/*/by-name/boot
-          do
-            if [ -e "$boot_block" ]; then
-              BLOCK="$boot_block"
-              break
-            fi
-          done
+          . tools/ak3-core.sh;
 
-          if [ -z "$BLOCK" ]; then
-            abort "Unable to find boot partition. Aborting..."
-          fi
-
-          ui_print " "
-          ui_print "Boot partition: $BLOCK"
-
-          dump_boot
-          write_boot
+          dump_boot;
+          write_boot;
           EOF
 
           sed -i 's/^          //' anykernel.sh
@@ -252,18 +216,11 @@ jobs:
             exit 1
           fi
 
-          echo "Final AnyKernel3 config:"
-          grep -n "kernel.string\|device.name\|BLOCK\|IS_SLOT_DEVICE" anykernel.sh
+          grep -n "kernel.string\|device.name\|block=\|BLOCK=\|is_slot_device\|IS_SLOT_DEVICE" anykernel.sh
 
           zip -r9 "$GITHUB_WORKSPACE/$ZIP_NAME" *
 
-      - name: Upload Kernel
-        uses: actions/upload-artifact@v4
-        with:
-          name: X00TD-A16-Stable-Kernel
-          path: X00TD-A16-Stable-4.19-Kernel.zip
-
-      - name: Create Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: x00td-a16-${{ github.run_number }}
@@ -276,4 +233,7 @@ jobs:
             Branch: fourteen
             Target ROM: Android 16 4.19-based ROMs
 
-            Take boot and dtbo backup before flashing.
+            Download and flash only:
+            X00TD-A16-Stable-4.19-Kernel.zip
+
+            Take boot backup before flashing.
