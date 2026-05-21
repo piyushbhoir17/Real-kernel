@@ -1,1 +1,165 @@
-KERNEL_REPO: piyushbhoir17/Real-kernel
+name: Build X00TD Kernel for Android 16
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fourteen
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    env:
+      ZIP_NAME: X00TD-A16-Stable-4.19-Kernel.zip
+
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          ref: fourteen
+
+      - name: Install Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            bc bison build-essential ccache curl flex git \
+            libncurses-dev libelf-dev liblz4-tool libssl-dev \
+            libxml2 libxml2-utils lzop rsync schedtool \
+            squashfs-tools xsltproc zip zlib1g-dev unzip \
+            device-tree-compiler cpio python3 python-is-python3 \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
+
+      - name: Clone Clang Toolchain
+        run: |
+          git clone --depth=1 -b 14 https://github.com/ZyCromerZ/Clang.git "$HOME/clang"
+
+      - name: Apply Build Patches
+        run: |
+          find scripts/dtc/ -type f -name "dtc-lexer.l" \
+            -exec sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/g' {} + 2>/dev/null || true
+
+          find scripts/dtc/ -type f -name "dtc-lexer.lex.c_shipped" \
+            -exec sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/g' {} + 2>/dev/null || true
+
+          if [ -f include/linux/cgroup-defs.h ]; then
+            sed -i -E 's/struct[[:space:]]+cgroup[[:space:]]+cgrp;/struct cgroup \*cgrp;/g' include/linux/cgroup-defs.h
+          fi
+
+      - name: Generate Defconfig
+        run: |
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export PATH="$HOME/clang/bin:$PATH"
+
+          mkdir -p out
+
+          DEFCONFIG_FILE=$(find arch/arm64/configs -type f -iname "*x00td*defconfig" | head -n 1)
+
+          if [ -z "$DEFCONFIG_FILE" ]; then
+            DEFCONFIG_FILE=$(find arch/arm64/configs -type f -iname "*sdm660*perf_defconfig*" | head -n 1)
+          fi
+
+          if [ -z "$DEFCONFIG_FILE" ]; then
+            echo "No suitable defconfig found"
+            find arch/arm64/configs -type f | sort
+            exit 1
+          fi
+
+          DEFCONFIG_NAME=$(echo "$DEFCONFIG_FILE" | sed 's|arch/arm64/configs/||')
+          echo "Using defconfig: $DEFCONFIG_NAME"
+
+          make O=out ARCH=arm64 "$DEFCONFIG_NAME"
+
+          scripts/config --file out/.config \
+            -e ANDROID_BINDER_IPC \
+            -e ANDROID_BINDERFS \
+            -e ASHMEM \
+            -e BPF_SYSCALL \
+            -e CGROUPS \
+            -e MEMCG \
+            -e NET_CLS_ACT \
+            -e NET_CLS_BPF \
+            -e NET_SCH_INGRESS \
+            -e SECCOMP \
+            -e SECCOMP_FILTER \
+            -e TMPFS_XATTR || true
+
+          scripts/config --file out/.config \
+            --set-str LOCALVERSION "-X00TD-A16-Stable" || true
+
+          make O=out ARCH=arm64 olddefconfig
+
+      - name: Build Kernel
+        run: |
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export PATH="$HOME/clang/bin:$PATH"
+          export KBUILD_BUILD_USER=github
+          export KBUILD_BUILD_HOST=actions
+
+          make -j"$(nproc --all)" \
+            O=out \
+            ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            KCFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-int-conversion -fcommon"
+
+      - name: Package with AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git "$HOME/AnyKernel3"
+
+          rm -rf "$HOME/AnyKernel3/.git"
+          rm -f "$HOME/AnyKernel3/README.md"
+
+          sed -i 's/kernel.string=.*/kernel.string=X00TD Android 16 Stable Kernel/g' "$HOME/AnyKernel3/anykernel.sh"
+          sed -i 's/do.devicecheck=.*/do.devicecheck=1/g' "$HOME/AnyKernel3/anykernel.sh"
+          sed -i 's/device.name1=.*/device.name1=X00TD/g' "$HOME/AnyKernel3/anykernel.sh"
+          sed -i 's/device.name2=.*/device.name2=X00T/g' "$HOME/AnyKernel3/anykernel.sh"
+          sed -i 's/device.name3=.*/device.name3=ASUS_X00TD/g' "$HOME/AnyKernel3/anykernel.sh"
+          sed -i 's/is_slot_device=.*/is_slot_device=0/g' "$HOME/AnyKernel3/anykernel.sh"
+          sed -i 's|block=.*|block=/dev/block/bootdevice/by-name/boot;|g' "$HOME/AnyKernel3/anykernel.sh"
+
+          BOOT_DIR="out/arch/arm64/boot"
+
+          if [ -f "$BOOT_DIR/Image.gz-dtb" ]; then
+            cp "$BOOT_DIR/Image.gz-dtb" "$HOME/AnyKernel3/Image.gz-dtb"
+          elif [ -f "$BOOT_DIR/Image.gz" ]; then
+            cp "$BOOT_DIR/Image.gz" "$HOME/AnyKernel3/Image.gz"
+          else
+            echo "No kernel image found"
+            find "$BOOT_DIR" -type f || true
+            exit 1
+          fi
+
+          if [ -f "$BOOT_DIR/dtbo.img" ]; then
+            cp "$BOOT_DIR/dtbo.img" "$HOME/AnyKernel3/dtbo.img"
+          fi
+
+          cd "$HOME/AnyKernel3"
+          zip -r9 "$GITHUB_WORKSPACE/$ZIP_NAME" *
+
+      - name: Upload Kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: X00TD-A16-Stable-Kernel
+          path: X00TD-A16-Stable-4.19-Kernel.zip
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: x00td-a16-${{ github.run_number }}
+          name: X00TD Android 16 Kernel ${{ github.run_number }}
+          files: X00TD-A16-Stable-4.19-Kernel.zip
