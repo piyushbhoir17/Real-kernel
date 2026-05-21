@@ -1,0 +1,261 @@
+name: Build X00TD KernelSU Next Kernel for Android 16
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build KernelSU Next Kernel
+    runs-on: ubuntu-22.04
+
+    env:
+      ZIP_NAME: X00TD-A16-KSUNext-4.19-Kernel.zip
+      LOCALVERSION: -X00TD-A16-KSUNext
+
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          ref: fourteen
+          fetch-depth: 1
+
+      - name: Install Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            bc bison build-essential ccache curl flex git \
+            libncurses-dev libelf-dev liblz4-tool libssl-dev \
+            libxml2 libxml2-utils lzop rsync schedtool \
+            squashfs-tools xsltproc zip zlib1g-dev unzip \
+            device-tree-compiler cpio python3 python-is-python3 \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
+            clang llvm lld
+
+      - name: Clone Clang Toolchain
+        run: |
+          git clone --depth=1 -b 14 https://github.com/ZyCromerZ/Clang.git "$HOME/clang"
+
+      - name: Apply Build Patches
+        run: |
+          find scripts/dtc/ -type f -name "dtc-lexer.l" \
+            -exec sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/g' {} + 2>/dev/null || true
+
+          find scripts/dtc/ -type f -name "dtc-lexer.lex.c_shipped" \
+            -exec sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/g' {} + 2>/dev/null || true
+
+      - name: Add KernelSU Next Legacy Driver
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+
+          echo "KernelSU Next integration check:"
+          test -d KernelSU-Next
+          test -e drivers/kernelsu
+          grep -n "kernelsu" drivers/Makefile
+          grep -n "drivers/kernelsu/Kconfig" drivers/Kconfig
+
+      - name: Generate Defconfig
+        run: |
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export PATH="$HOME/clang/bin:$PATH"
+
+          mkdir -p out
+
+          DEFCONFIG_FILE=$(find arch/arm64/configs -type f -iname "*x00td*defconfig" | head -n 1)
+
+          if [ -z "$DEFCONFIG_FILE" ]; then
+            DEFCONFIG_FILE=$(find arch/arm64/configs -type f -iname "*sdm660*perf_defconfig*" | head -n 1)
+          fi
+
+          if [ -z "$DEFCONFIG_FILE" ]; then
+            echo "No suitable X00TD/SDM660 defconfig found."
+            find arch/arm64/configs -type f | sort
+            exit 1
+          fi
+
+          DEFCONFIG_NAME=$(echo "$DEFCONFIG_FILE" | sed 's|arch/arm64/configs/||')
+          echo "Using defconfig: $DEFCONFIG_NAME"
+
+          make O=out ARCH=arm64 "$DEFCONFIG_NAME"
+
+          scripts/config --file out/.config \
+            -e ANDROID_BINDER_IPC \
+            -e ANDROID_BINDERFS \
+            -e ASHMEM \
+            -e BPF_SYSCALL \
+            -e CGROUPS \
+            -e MEMCG \
+            -e NET_CLS_ACT \
+            -e NET_CLS_BPF \
+            -e NET_SCH_INGRESS \
+            -e SECCOMP \
+            -e SECCOMP_FILTER \
+            -e TMPFS_XATTR \
+            -e TMPFS_POSIX_ACL \
+            -e DEVTMPFS \
+            -e DEVTMPFS_MOUNT || true
+
+          scripts/config --file out/.config \
+            -e KSU \
+            -e KPROBES \
+            -e KPROBE_EVENTS \
+            -e KSU_KPROBE_HOOKS || true
+
+          scripts/config --file out/.config \
+            -d DEBUG_INFO \
+            -d DEBUG_KERNEL \
+            -d LOCALVERSION_AUTO || true
+
+          scripts/config --file out/.config \
+            --set-str LOCALVERSION "$LOCALVERSION" \
+            --set-str SYSTEM_TRUSTED_KEYS "" \
+            --set-str SYSTEM_REVOCATION_KEYS "" || true
+
+          make O=out ARCH=arm64 olddefconfig
+
+          echo "KernelSU Next config result:"
+          grep -E "CONFIG_KSU|CONFIG_KPROBES|CONFIG_KPROBE_EVENTS|CONFIG_KSU_KPROBE_HOOKS" out/.config || true
+
+          grep -q "^CONFIG_KSU=y" out/.config
+          grep -q "^CONFIG_KPROBES=y" out/.config
+
+      - name: Build Kernel
+        run: |
+          set -o pipefail
+
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export PATH="$HOME/clang/bin:$PATH"
+          export KBUILD_BUILD_USER=github
+          export KBUILD_BUILD_HOST=actions
+
+          clang --version
+          /usr/bin/ld.lld --version
+
+          make -j"$(nproc --all)" \
+            O=out \
+            ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LD=/usr/bin/ld.lld \
+            AR=/usr/bin/llvm-ar \
+            NM=/usr/bin/llvm-nm \
+            OBJCOPY=/usr/bin/llvm-objcopy \
+            OBJDUMP=/usr/bin/llvm-objdump \
+            STRIP=/usr/bin/llvm-strip \
+            KCFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-int-conversion -fcommon" \
+            2>&1 | tee kernel-build.log
+
+      - name: Upload Build Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ksunext-kernel-build-log
+          path: kernel-build.log
+
+      - name: Verify Kernel Output
+        run: |
+          BOOT_DIR="out/arch/arm64/boot"
+
+          find "$BOOT_DIR" -maxdepth 2 -type f | sort || true
+
+          if [ ! -f "$BOOT_DIR/Image.gz-dtb" ] && [ ! -f "$BOOT_DIR/Image.gz" ]; then
+            echo "No kernel image found."
+            exit 1
+          fi
+
+      - name: Package Flashable Zip
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git "$HOME/AnyKernel3"
+
+          rm -rf "$HOME/AnyKernel3/.git"
+          rm -f "$HOME/AnyKernel3/README.md"
+
+          cd "$HOME/AnyKernel3"
+
+          cat > anykernel.sh <<'EOF'
+          ### AnyKernel3 Ramdisk Mod Script
+          ### X00TD Android 16 KernelSU Next Kernel
+
+          properties() { '
+          kernel.string=X00TD Android 16 KernelSU Next 4.19 Kernel
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=X00TD
+          device.name2=X00T
+          device.name3=ASUS_X00TD
+          device.name4=ZB601KL
+          device.name5=ZB602KL
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+
+          boot_attributes() {
+            set_perm_recursive 0 0 755 644 $RAMDISK/*;
+            set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
+          }
+
+          block=boot;
+          is_slot_device=0;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
+
+          BLOCK=boot;
+          IS_SLOT_DEVICE=0;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          . tools/ak3-core.sh;
+
+          dump_boot;
+          write_boot;
+          EOF
+
+          sed -i 's/^          //' anykernel.sh
+
+          BOOT_DIR="$GITHUB_WORKSPACE/out/arch/arm64/boot"
+
+          if [ -f "$BOOT_DIR/Image.gz-dtb" ]; then
+            cp "$BOOT_DIR/Image.gz-dtb" Image.gz-dtb
+          elif [ -f "$BOOT_DIR/Image.gz" ]; then
+            cp "$BOOT_DIR/Image.gz" Image.gz
+          else
+            echo "No kernel image found"
+            find "$BOOT_DIR" -type f || true
+            exit 1
+          fi
+
+          grep -n "kernel.string\|device.name\|block=\|BLOCK=\|is_slot_device\|IS_SLOT_DEVICE" anykernel.sh
+
+          zip -r9 "$GITHUB_WORKSPACE/$ZIP_NAME" *
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: x00td-a16-ksunext-${{ github.run_number }}
+          name: X00TD Android 16 KernelSU Next Kernel ${{ github.run_number }}
+          files: X00TD-A16-KSUNext-4.19-Kernel.zip
+          body: |
+            X00TD Android 16 KernelSU Next 4.19 kernel build.
+
+            Device: ASUS Zenfone Max Pro M1 / X00TD
+            Branch: fourteen
+            Root: KernelSU Next legacy non-GKI integration
+            Target ROM: Android 16 4.19-based ROMs
+
+            Download and flash only:
+            X00TD-A16-KSUNext-4.19-Kernel.zip
+
+            After flashing, install/open KernelSU Next Manager.
+
+            Take boot backup before flashing.
