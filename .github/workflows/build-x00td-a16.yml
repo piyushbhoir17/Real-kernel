@@ -32,11 +32,23 @@ jobs:
             squashfs-tools xsltproc zip zlib1g-dev unzip \
             device-tree-compiler cpio python3 python-is-python3 \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
-            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
+            llvm lld clang
 
       - name: Clone Clang Toolchain
         run: |
           git clone --depth=1 -b 14 https://github.com/ZyCromerZ/Clang.git "$HOME/clang"
+
+      - name: Check Toolchain
+        run: |
+          echo "GitHub LLVM:"
+          which clang || true
+          which ld.lld || true
+          which llvm-objdump || true
+          which llvm-ar || true
+
+          echo "ZyCromerZ Clang:"
+          ls -la "$HOME/clang/bin" || true
 
       - name: Apply Build Patches
         run: |
@@ -102,6 +114,18 @@ jobs:
           export KBUILD_BUILD_USER=github
           export KBUILD_BUILD_HOST=actions
 
+          echo "Compiler:"
+          which clang
+          clang --version
+
+          echo "LLVM tools:"
+          which /usr/bin/ld.lld
+          which /usr/bin/llvm-objdump
+          which /usr/bin/llvm-ar
+          which /usr/bin/llvm-nm
+          which /usr/bin/llvm-objcopy
+          which /usr/bin/llvm-strip
+
           make -j"$(nproc --all)" \
             O=out \
             ARCH=arm64 \
@@ -109,12 +133,12 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
+            LD=/usr/bin/ld.lld \
+            AR=/usr/bin/llvm-ar \
+            NM=/usr/bin/llvm-nm \
+            OBJCOPY=/usr/bin/llvm-objcopy \
+            OBJDUMP=/usr/bin/llvm-objdump \
+            STRIP=/usr/bin/llvm-strip \
             KCFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-int-conversion -fcommon"
 
       - name: Package with AnyKernel3
