@@ -11,16 +11,19 @@ permissions:
 
 jobs:
   build:
+    name: Build Kernel
     runs-on: ubuntu-22.04
 
     env:
       ZIP_NAME: X00TD-A16-Stable-4.19-Kernel.zip
+      LOCALVERSION: -X00TD-A16-Stable
 
     steps:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
           ref: fourteen
+          fetch-depth: 1
 
       - name: Install Dependencies
         run: |
@@ -33,22 +36,26 @@ jobs:
             device-tree-compiler cpio python3 python-is-python3 \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
-            llvm lld clang
+            clang llvm lld
 
       - name: Clone Clang Toolchain
         run: |
           git clone --depth=1 -b 14 https://github.com/ZyCromerZ/Clang.git "$HOME/clang"
 
-      - name: Check Toolchain
+      - name: Check Build Tools
         run: |
-          echo "GitHub LLVM:"
-          which clang || true
-          which ld.lld || true
-          which llvm-objdump || true
-          which llvm-ar || true
+          echo "Kernel source:"
+          pwd
+          git branch --show-current
+          git rev-parse --short HEAD
 
           echo "ZyCromerZ Clang:"
-          ls -la "$HOME/clang/bin" || true
+          "$HOME/clang/bin/clang" --version || true
+
+          echo "System LLVM:"
+          /usr/bin/clang --version
+          /usr/bin/ld.lld --version
+          /usr/bin/llvm-objdump --version
 
       - name: Apply Build Patches
         run: |
@@ -77,7 +84,7 @@ jobs:
           fi
 
           if [ -z "$DEFCONFIG_FILE" ]; then
-            echo "No suitable defconfig found"
+            echo "No suitable X00TD/SDM660 defconfig found."
             find arch/arm64/configs -type f | sort
             exit 1
           fi
@@ -99,15 +106,27 @@ jobs:
             -e NET_SCH_INGRESS \
             -e SECCOMP \
             -e SECCOMP_FILTER \
-            -e TMPFS_XATTR || true
+            -e TMPFS_XATTR \
+            -e TMPFS_POSIX_ACL \
+            -e DEVTMPFS \
+            -e DEVTMPFS_MOUNT || true
 
           scripts/config --file out/.config \
-            --set-str LOCALVERSION "-X00TD-A16-Stable" || true
+            -d DEBUG_INFO \
+            -d DEBUG_KERNEL \
+            -d LOCALVERSION_AUTO || true
+
+          scripts/config --file out/.config \
+            --set-str LOCALVERSION "$LOCALVERSION" \
+            --set-str SYSTEM_TRUSTED_KEYS "" \
+            --set-str SYSTEM_REVOCATION_KEYS "" || true
 
           make O=out ARCH=arm64 olddefconfig
 
       - name: Build Kernel
         run: |
+          set -o pipefail
+
           export ARCH=arm64
           export SUBARCH=arm64
           export PATH="$HOME/clang/bin:$PATH"
@@ -119,14 +138,11 @@ jobs:
           clang --version
 
           echo "LLVM tools:"
-          which /usr/bin/ld.lld
-          which /usr/bin/llvm-objdump
-          which /usr/bin/llvm-ar
-          which /usr/bin/llvm-nm
-          which /usr/bin/llvm-objcopy
-          which /usr/bin/llvm-strip
+          /usr/bin/ld.lld --version
+          /usr/bin/llvm-objdump --version
+          /usr/bin/llvm-ar --version
 
-          make -j"$(nproc --all)" \
+          make -j1 V=1 \
             O=out \
             ARCH=arm64 \
             CC=clang \
@@ -139,7 +155,27 @@ jobs:
             OBJCOPY=/usr/bin/llvm-objcopy \
             OBJDUMP=/usr/bin/llvm-objdump \
             STRIP=/usr/bin/llvm-strip \
-            KCFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-int-conversion -fcommon"
+            KCFLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-int-conversion -fcommon" \
+            2>&1 | tee kernel-build.log
+
+      - name: Upload Build Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-build-log
+          path: kernel-build.log
+
+      - name: Verify Kernel Output
+        run: |
+          BOOT_DIR="out/arch/arm64/boot"
+
+          echo "Boot output files:"
+          find "$BOOT_DIR" -maxdepth 2 -type f | sort || true
+
+          if [ ! -f "$BOOT_DIR/Image.gz-dtb" ] && [ ! -f "$BOOT_DIR/Image.gz" ]; then
+            echo "No kernel image found."
+            exit 1
+          fi
 
       - name: Package with AnyKernel3
         run: |
@@ -148,7 +184,7 @@ jobs:
           rm -rf "$HOME/AnyKernel3/.git"
           rm -f "$HOME/AnyKernel3/README.md"
 
-          sed -i 's/kernel.string=.*/kernel.string=X00TD Android 16 Stable Kernel/g' "$HOME/AnyKernel3/anykernel.sh"
+          sed -i 's/kernel.string=.*/kernel.string=X00TD Android 16 Stable 4.19 Kernel/g' "$HOME/AnyKernel3/anykernel.sh"
           sed -i 's/do.devicecheck=.*/do.devicecheck=1/g' "$HOME/AnyKernel3/anykernel.sh"
           sed -i 's/device.name1=.*/device.name1=X00TD/g' "$HOME/AnyKernel3/anykernel.sh"
           sed -i 's/device.name2=.*/device.name2=X00T/g' "$HOME/AnyKernel3/anykernel.sh"
@@ -162,10 +198,6 @@ jobs:
             cp "$BOOT_DIR/Image.gz-dtb" "$HOME/AnyKernel3/Image.gz-dtb"
           elif [ -f "$BOOT_DIR/Image.gz" ]; then
             cp "$BOOT_DIR/Image.gz" "$HOME/AnyKernel3/Image.gz"
-          else
-            echo "No kernel image found"
-            find "$BOOT_DIR" -type f || true
-            exit 1
           fi
 
           if [ -f "$BOOT_DIR/dtbo.img" ]; then
@@ -187,3 +219,11 @@ jobs:
           tag_name: x00td-a16-${{ github.run_number }}
           name: X00TD Android 16 Kernel ${{ github.run_number }}
           files: X00TD-A16-Stable-4.19-Kernel.zip
+          body: |
+            X00TD Android 16 stable 4.19 kernel build.
+
+            Device: ASUS Zenfone Max Pro M1 / X00TD
+            Branch: fourteen
+            Target ROM: Android 16 4.19-based ROMs
+
+            Take boot and dtbo backup before flashing.
