@@ -138,7 +138,7 @@ jobs:
           /usr/bin/llvm-objdump --version
           /usr/bin/llvm-ar --version
 
-          make -j1 V=1 \
+          make -j"$(nproc --all)" \
             O=out \
             ARCH=arm64 \
             CC=clang \
@@ -180,27 +180,81 @@ jobs:
           rm -rf "$HOME/AnyKernel3/.git"
           rm -f "$HOME/AnyKernel3/README.md"
 
-          sed -i 's/kernel.string=.*/kernel.string=X00TD Android 16 Stable 4.19 Kernel/g' "$HOME/AnyKernel3/anykernel.sh"
-          sed -i 's/do.devicecheck=.*/do.devicecheck=1/g' "$HOME/AnyKernel3/anykernel.sh"
-          sed -i 's/device.name1=.*/device.name1=X00TD/g' "$HOME/AnyKernel3/anykernel.sh"
-          sed -i 's/device.name2=.*/device.name2=X00T/g' "$HOME/AnyKernel3/anykernel.sh"
-          sed -i 's/device.name3=.*/device.name3=ASUS_X00TD/g' "$HOME/AnyKernel3/anykernel.sh"
-          sed -i 's/is_slot_device=.*/is_slot_device=0/g' "$HOME/AnyKernel3/anykernel.sh"
-          sed -i 's|block=.*|block=/dev/block/bootdevice/by-name/boot;|g' "$HOME/AnyKernel3/anykernel.sh"
+          cd "$HOME/AnyKernel3"
 
-          BOOT_DIR="out/arch/arm64/boot"
+          cat > anykernel.sh <<'EOF'
+          ### AnyKernel3 Ramdisk Mod Script
+          ### X00TD Android 16 Stable Kernel
+
+          properties() { '
+          kernel.string=X00TD Android 16 Stable 4.19 Kernel
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=X00TD
+          device.name2=X00T
+          device.name3=ASUS_X00TD
+          device.name4=ZB601KL
+          device.name5=ZB602KL
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+
+          boot_attributes() {
+            set_perm_recursive 0 0 755 644 $RAMDISK/*;
+            set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
+          }
+
+          BLOCK=
+          IS_SLOT_DEVICE=0
+          RAMDISK_COMPRESSION=auto
+          PATCH_VBMETA_FLAG=auto
+
+          . tools/ak3-core.sh
+
+          for boot_block in \
+            /dev/block/bootdevice/by-name/boot \
+            /dev/block/by-name/boot \
+            /dev/block/platform/*/by-name/boot \
+            /dev/block/platform/*/*/by-name/boot
+          do
+            if [ -e "$boot_block" ]; then
+              BLOCK="$boot_block"
+              break
+            fi
+          done
+
+          if [ -z "$BLOCK" ]; then
+            abort "Unable to find boot partition. Aborting..."
+          fi
+
+          ui_print " "
+          ui_print "Boot partition: $BLOCK"
+
+          dump_boot
+          write_boot
+          EOF
+
+          sed -i 's/^          //' anykernel.sh
+
+          BOOT_DIR="$GITHUB_WORKSPACE/out/arch/arm64/boot"
 
           if [ -f "$BOOT_DIR/Image.gz-dtb" ]; then
-            cp "$BOOT_DIR/Image.gz-dtb" "$HOME/AnyKernel3/Image.gz-dtb"
+            cp "$BOOT_DIR/Image.gz-dtb" Image.gz-dtb
           elif [ -f "$BOOT_DIR/Image.gz" ]; then
-            cp "$BOOT_DIR/Image.gz" "$HOME/AnyKernel3/Image.gz"
+            cp "$BOOT_DIR/Image.gz" Image.gz
+          else
+            echo "No kernel image found"
+            find "$BOOT_DIR" -type f || true
+            exit 1
           fi
 
-          if [ -f "$BOOT_DIR/dtbo.img" ]; then
-            cp "$BOOT_DIR/dtbo.img" "$HOME/AnyKernel3/dtbo.img"
-          fi
+          echo "Final AnyKernel3 config:"
+          grep -n "kernel.string\|device.name\|BLOCK\|IS_SLOT_DEVICE" anykernel.sh
 
-          cd "$HOME/AnyKernel3"
           zip -r9 "$GITHUB_WORKSPACE/$ZIP_NAME" *
 
       - name: Upload Kernel
