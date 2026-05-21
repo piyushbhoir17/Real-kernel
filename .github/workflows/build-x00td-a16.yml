@@ -65,10 +65,6 @@ jobs:
           find scripts/dtc/ -type f -name "dtc-lexer.lex.c_shipped" \
             -exec sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/g' {} + 2>/dev/null || true
 
-          if [ -f include/linux/cgroup-defs.h ]; then
-            sed -i -E 's/struct[[:space:]]+cgroup[[:space:]]+cgrp;/struct cgroup \*cgrp;/g' include/linux/cgroup-defs.h
-          fi
-
       - name: Generate Defconfig
         run: |
           export ARCH=arm64
